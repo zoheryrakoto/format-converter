@@ -47,7 +47,7 @@ if ( ! class_exists( 'Format_Converter' ) ) {
         'format-converter/v1',
         '/esf-responses',
         array(
-          'methods' => WP_REST_Server::READABLE,
+          'methods' => 'GET, POST',
           'callback' => array( $this, 'get_esf_responses' ),
           'permission_callback' => array( $this, 'check_permission' ),
           'args' => array(
