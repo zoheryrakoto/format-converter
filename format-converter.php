@@ -66,6 +66,38 @@ if ( ! class_exists( 'Format_Converter' ) ) {
           )
         )
       );
+
+      register_rest_route(
+        'format-converter/v1',
+        '/esf-campaigns/(?P<id>\d+)/field-structure',
+        array(
+          'methods' => 'GET',
+          'callback' => array( $this, 'export_field_structure' ),
+          'permission_callback' => array( $this, 'allow_public' ),
+          'args' => array(
+            'id' => array(
+              'required' => true,
+              'sanitize_callback' => 'absint',
+            )
+          )
+        )
+      );
+
+      register_rest_route(
+        'format-converter/v1',
+        '/esf-campaigns/(?P<id>\d+)/field-mapping',
+        array(
+          'methods' => 'GET',
+          'callback' => array( $this, 'export_field_mapping' ),
+          'permission_callback' => array( $this, 'allow_public' ),
+          'args' => array(
+            'id' => array(
+              'required' => true,
+              'sanitize_callback' => 'absint',
+            ),
+          ),
+        )
+      );
     }
 
     public function get_esf_responses( WP_REST_Request $request ) {
@@ -107,6 +139,149 @@ if ( ! class_exists( 'Format_Converter' ) ) {
       return $response;
     }
 
+    public function export_field_structure( WP_REST_Request $request ) {
+      global $wpdb;
+
+      $campaign_id = $request->get_param( 'id' );
+      $table = $wpdb->prefix . 'esf_campaigns';
+
+      $campaign = $wpdb->get_row(
+        $wpdb->prepare(
+          "SELECT * FROM {$table} WHERE id = %d", 
+          $campaign_id
+        ),
+        ARRAY_A
+      );
+
+      if ( $wpdb->last_error ) {
+        return new WP_Error( 'db_error', $wpdb->last_error, array( 'status' => 500 ) );
+      }
+
+      if ( ! $campaign ) {
+        return new WP_Error( 'not_found', __( 'Campaign not found.', 'format-converter' ), array( 'status' => 404 ) );
+      }
+
+      $raw_fields = json_decode( $campaign['field_structure'], true );
+
+      if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $raw_fields ) ) {
+        return new WP_Error( 'invalid_structure', __( 'Invalid field structure.', 'format-converter' ), array( 'status' => 500 ) );
+      }
+
+      $converted = array_map( array( $this, 'convert_field' ), $raw_fields );
+      $converted = array_filter($converted, function($item){ return isset($item['name']); });
+      $converted = array_values($converted);
+      $json = wp_json_encode( $converted, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE );
+
+      $filename = sanitize_file_name( ( $campaign['name'] ?? 'campaign-' . $campaign_id ) . '-fields.json' );
+
+      header( 'Content-Type: application/json' );
+      header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+      header( 'Content-Length: ' . strlen( $json ) );
+
+      echo $json;
+      exit;
+    }
+
+    public function export_field_mapping( WP_REST_Request $request ) {
+      global $wpdb;
+
+      $campaign_id = $request->get_param( 'id' );
+      $table = $wpdb->prefix . 'esf_campaigns';
+
+      $campaign = $wpdb->get_row(
+        $wpdb->prepare(
+          "SELECT * FROM {$table} WHERE id = %d",
+          $campaign_id
+        ),
+        ARRAY_A
+      );
+
+      if ( $wpdb->last_error ) {
+        return new WP_Error( 'db_error', $wpdb->last_error, array( 'status' => 500 ) );
+      }
+
+      if ( ! $campaign ) {
+        return new WP_Error( 'not_found', __( 'Campaign not found.', 'format-converter' ), array( 'status' => 404 ) );
+      }
+
+      $raw_fields = json_decode( $campaign['field_structure'], true );
+
+      if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $raw_fields ) ) {
+        return new WP_Error( 'invalid_structure', __( 'Invalid field structure.', 'format-converter' ), array( 'status' => 500 ) );
+      }
+
+      $mapping = array();
+      foreach ( $raw_fields as $field ) {
+        $name = $field['name'] ?? $field['id'] ?? '';
+        if ( empty( $name ) ) {
+          continue;
+        }
+        $mapping[] = array(
+          'system' => $name,
+          'source' => $name,
+        );
+      }
+
+      $json = wp_json_encode( $mapping, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE );
+      $filename = sanitize_file_name( ( $campaign['name'] ?? 'campaign-' . $campaign_id ) . '-mapping.json' );
+
+      header( 'Content-Type: application/json' );
+      header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+      header( 'Content-Length: ' . strlen( $json ) );
+
+      echo $json;
+      exit;
+    }
+
+    private function convert_field( array $field ): array {
+      $type_map = array(
+        'text' => 'text',
+        'email' => 'email',
+        'textarea' => 'textarea',
+        'radio' => 'radio',
+        'checkbox' => 'checkbox',
+        'select' => 'select',
+        'number' => 'number',
+        'date' => 'date',
+      );
+
+      $type = ! empty( $field['hidden'] )
+        ? 'hidden'
+        : $type_map[ $field['type'] ?? 'text' ] ?? 'text';
+
+      // Determine views: fields marked as list_visible appear in both views
+      $views = array( 'single', 'list' );
+
+      $name = $field['name'] ?? $field['id'] ?? '';
+
+      $converted = array(
+        'label' => $field['label'] ?? '',
+        'type' => $type,
+        'required' => (bool) ( $field['required'] ?? false ),
+        'views' => $views,
+      );
+
+      if ( ! empty( $name ) ) {
+        $converted = array_merge( array( 'name' => $name ), $converted );
+      }
+
+      // Map options for radio/checkbox/select 
+      if ( in_array( $type, array( 'radio', 'checkbox', 'select' ), true ) && ! empty( $field['options'] ) ) {
+        $converted['options'] = array_map( function( $opt ) {
+          if ( is_array( $opt ) ) {
+            return array(
+              'label' => $opt['label'] ?? $opt['value'] ?? '',
+              'value' => $opt['value'] ?? '',
+            );
+          }
+
+          return array( 'label' => $opt, 'value' => $opt );
+        }, $field['options'] );
+      }
+
+      return $converted;
+    }
+
     private function convert_responses( array $row ) {
       $response_data = json_decode( $row['response_data'], true );
 
@@ -136,6 +311,10 @@ if ( ! class_exists( 'Format_Converter' ) ) {
         );
       }
 
+      return true;
+    }
+
+    public function allow_public() {
       return true;
     }
   } 
