@@ -98,6 +98,22 @@ if ( ! class_exists( 'Format_Converter' ) ) {
           ),
         )
       );
+
+      register_rest_route(
+        'format-converter/v1',
+        '/esf-campaigns/(?P<id>\d+)/raw-field-structure',
+        array(
+          'methods' => 'GET',
+          'callback' => array( $this, 'get_raw_field_structure' ),
+          'permission_callback' => array( $this, 'allow_public' ),
+          'args' => array(
+            'id' => array(
+              'required' => true,
+              'sanitize_callback' => 'absint',
+            )
+          )
+        )
+      );
     }
 
     public function get_esf_responses( WP_REST_Request $request ) {
@@ -231,6 +247,38 @@ if ( ! class_exists( 'Format_Converter' ) ) {
 
       echo $json;
       exit;
+    }
+
+    public function get_raw_field_structure( WP_REST_Request $request ) {
+      global $wpdb;
+
+      $campaign_id = $request->get_param( 'id' );
+      $table = $wpdb->prefix . 'esf_campaigns';
+
+      $campaign = $wpdb->get_row(
+        $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $campaign_id ),
+        ARRAY_A
+      );
+
+      if ( $wpdb->last_error ) {
+        return new WP_Error( 'db_error', $wpdb->last_error, array( 'status' => 500 ) );
+      }
+
+      if ( ! $campaign ) {
+        return new WP_Error( 'not_found', __( 'Campaign not found.', 'format-converter' ), array( 'status' => 404 ) );
+      }
+
+      $raw_fields = json_decode( $campaign['field_structure'], true );
+
+      if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $raw_fields ) ) {
+        return new WP_Error( 'invalid_structure', __( 'Invalid field structure.', 'format-converter' ), array( 'status' => 500 ) );
+      }
+
+      return rest_ensure_response( array(
+        'campaign_id' => $campaign_id,
+        'campaign_name' => $campaign['name'] ?? '',
+        'field_structure' => $raw_fields,
+      ) );
     }
 
     private function convert_field( array $field ): array {
